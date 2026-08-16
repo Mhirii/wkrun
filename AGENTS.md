@@ -120,7 +120,7 @@ ADRs live under `docs/adr/` and are named:
 [issue number]-[ADR number relative to that issue]-[name].md
 ```
 
-Use zero-padded numeric fields. For example, the first ADR for issue `#24` is `docs/adr/0024-01-name.md`.
+Use zero-padded numeric fields: a 4-digit issue number followed by a 3-digit ADR number. For example, the first ADR for issue `#24` is `docs/adr/0024-001-name.md`.
 
 When a task introduces or changes an architectural decision, add or update the relevant ADR rather than leaving the decision only in code or discussion.
 

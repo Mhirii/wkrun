@@ -23,10 +23,10 @@ Architecture Decision Records live in [`docs/adr/`](docs/adr/). Name each ADR us
 [issue number]-[ADR number relative to that issue]-[name].md
 ```
 
-Use zero-padded numeric fields. The first ADR for issue `#24`, for example, is:
+Use zero-padded numeric fields: a 4-digit issue number followed by a 3-digit ADR number. The first ADR for issue `#24`, for example, is:
 
 ```text
-docs/adr/0024-01-name.md
+docs/adr/0024-001-name.md
 ```
 
 If your change introduces or revises an architectural decision, record it in the appropriate ADR instead of documenting it only in code or a PR discussion.
