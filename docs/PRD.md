@@ -2,24 +2,29 @@
 
 ## 1. Overview
 
-`wkrun` is a local development orchestration tool for projects that require multiple services or processes to run together.
+`wkrun` is a local development orchestration tool for projects that require multiple servers, services, or supporting processes to run together.
 
-Typical development environments require developers to manually manage several terminals, tmux panes, Docker Compose sessions, dev servers, workers, databases, and related processes.
+A typical development environment may require:
 
-`wkrun` replaces that workflow with a single tool that:
+* a backend server
+* a frontend dev server
+* background workers
+* databases
+* Docker containers
+* Docker Compose services
+* auxiliary development processes
 
-* starts and supervises all services required by a project
-* allocates conflict-free host ports
-* manages local processes, Docker containers, and Docker Compose services
-* handles dependencies and readiness
-* aggregates and exposes logs
-* persists project and workspace information
-* provides both a CLI and a terminal user interface
-* forms the foundation for isolated, parallel Git worktree environments
+Without orchestration, these are commonly spread across multiple terminals, tmux panes, or manually managed background processes.
 
-The MVP is explicitly configuration-driven.
+`wkrun` replaces that workflow with a single tool that starts, supervises, observes, and controls the entire local development environment.
 
-Automatic project and service detection is planned after MVP.
+The core command is:
+
+```bash
+wkrun up
+```
+
+The MVP is configuration-driven. Automatic service discovery is post-MVP.
 
 ---
 
@@ -43,9 +48,9 @@ the developer should be able to run:
 wkrun up
 ```
 
-and let `wkrun` manage the runtime environment.
+and let `wkrun` own the orchestration.
 
-The long-term model is:
+The domain hierarchy is:
 
 ```text
 Project
@@ -53,13 +58,31 @@ Project
     └── Service
 ```
 
-A project may eventually contain multiple simultaneously running workspaces, particularly when Git worktrees are used.
+This hierarchy exists from MVP even though advanced multi-workspace functionality, especially Git worktree support, expands after MVP.
 
 ---
 
-# 3. Goals
+# 3. Supported Platforms
 
-The MVP must provide a genuinely usable local development workflow.
+MVP supports:
+
+* Linux
+* macOS
+
+Windows is not an MVP target.
+
+The implementation may rely on Unix-specific primitives such as:
+
+* Unix domain sockets
+* Unix process groups
+* Unix signals
+* Unix filesystem semantics
+
+---
+
+# 4. Goals
+
+The MVP must provide a usable daily-development workflow.
 
 It must:
 
@@ -67,85 +90,92 @@ It must:
 * support local processes
 * support Docker containers
 * support Docker Compose services
+* support dependency ordering
+* support readiness checks
+* allocate dynamic host ports
+* support fixed host ports
+* support environment interpolation
+* support service-to-service port interpolation
 * supervise services after launch
 * automatically restart unexpectedly crashed services
-* support dependency ordering
-* support service readiness checks
-* allocate free host ports automatically
-* allow configuration values to reference dynamically allocated ports
-* support environment-variable interpolation
-* aggregate service logs
-* persist known projects and workspaces across invocations
-* expose service management through a CLI
-* provide a first-class TUI
-* allow the TUI to exit without stopping running services
-* support navigation between projects, workspaces, services, metadata, and logs
-* remain compatible with existing development hot-reload tools
+* surface failed, blocked, and degraded states
+* persist known projects and workspaces
+* expose control through an intuitive CLI
+* expose control through a first-class TUI
+* allow CLI commands to return while services continue running
+* allow the TUI to exit without stopping services
+* aggregate and expose logs
+* coexist with existing hot-reload tooling
+* establish an architecture that naturally supports multiple projects and Git worktrees later
 
 ---
 
-# 4. Non-Goals for MVP
+# 5. Non-Goals for MVP
 
 The MVP will not:
 
-* implement source-file watching
-* implement its own hot-reload system
-* automatically infer project services
+* implement file watching
+* implement source-triggered hot reload
+* automatically discover project services
 * automatically create Git worktrees
-* automatically isolate Docker resources across worktrees
-* automatically resolve worktree-specific port conflicts beyond normal workspace port allocation
-* restart dependent services when a dependency restarts
+* provide full worktree lifecycle management
 * provide advanced HTTP readiness configuration
-* provide extensive user-configurable restart policies
-* require a global always-running daemon
+* provide extensive restart policy customization
+* support Windows
 * replace Docker Compose
-* replace tmux or a terminal emulator
-* provide a full terminal multiplexer
+* replace tmux
+* replace a terminal emulator
+* act as a general terminal multiplexer
 
-Tools such as Vite, Air, Nodemon, framework-specific dev servers, and similar utilities continue to own hot reload.
+Tools such as Vite, Air, Nodemon, and framework development servers continue to own hot reload.
 
-`wkrun` supervises the outer process.
+`wkrun` supervises their outer process.
 
 ---
 
-# 5. Core Domain Model
+# 6. Core Domain Model
 
-## 5.1 Project
+## 6.1 Project
 
 A **project** represents a development project known to `wkrun`.
 
-A project has:
+A project contains:
 
-* an identity
-* a filesystem root
-* a discovered configuration file
+* a stable internal identity
+* a canonical filesystem root
+* its selected configuration file
 * one or more workspaces
 
-For MVP, most projects will normally have one workspace.
+Project paths should be canonicalized so accessing the same project through symlinks does not create duplicate registrations.
+
+The directory containing the selected configuration file is the project root. All relative configuration paths resolve from this directory, including process `cwd` values and Compose file paths. Git repository/worktree roots are metadata and do not alter config-relative path resolution.
 
 ---
 
-## 5.2 Workspace
+## 6.2 Workspace
 
-A **workspace** represents one runnable instance of a project.
+A **workspace** represents one independently runnable instance of a project.
 
-A workspace owns runtime state including:
+For an ordinary non-worktree project, this is the project's normal/default workspace.
+
+With future Git worktree support, each worktree maps to a separate workspace.
+
+A workspace owns or references:
 
 * services
+* runtime state
 * allocated host ports
-* running processes
-* container instances
 * logs
-* supervisor state
-* workspace metadata
+* worktree metadata when applicable
+* Docker/Compose resources associated with that workspace
 
-The abstraction must exist in MVP even though advanced multi-workspace functionality is primarily intended for post-MVP Git worktree support.
+Every registered project and workspace has a stable internal ID persisted in SQLite. Internal IDs must not be derived from mutable values such as branch names. Internal IDs and human-facing workspace names are separate.
 
 ---
 
-## 5.3 Service
+## 6.3 Service
 
-A **service** is one managed runtime component inside a workspace.
+A **service** is one managed runtime component within a workspace.
 
 A service may be:
 
@@ -155,19 +185,17 @@ A service may be:
 
 A service may define:
 
+* command/runtime configuration
 * dependencies
-* ports
+* named ports
 * environment variables
 * readiness
-* runtime-specific options
 
 ---
 
-# 6. Configuration Discovery
+# 7. Configuration Discovery
 
-`wkrun` must automatically search for supported project configuration files.
-
-Supported filenames are:
+Supported configuration filenames, in preferred order:
 
 ```text
 wkrun.toml
@@ -178,50 +206,47 @@ workrun.toml
 workrun.yaml
 workrun.yml
 
-project.toml
-project.yaml
-project.yml
-
-Workfile
-
-Wkrun
-```
-
-`Workfile` must contain TOML.
-
-`Wkrun` must contain TOML.
-
-The extensionless forms are therefore parsed exclusively as TOML.
-
-If multiple supported files exist in the same project, `wkrun` must use a deterministic priority order.
-
-Recommended priority:
-
-```text
-wkrun.toml
-wkrun.yaml
-wkrun.yml
-workrun.toml
-workrun.yaml
-workrun.yml
 Workfile
 Wkrun
+
 project.toml
 project.yaml
 project.yml
 ```
 
-If multiple files are present, `wkrun` should surface which file was selected.
+`Workfile` is always TOML.
+
+`Wkrun` is always TOML.
+
+`project.*` is treated specially because the name is generic.
+
+A `project.toml`, `project.yaml`, or `project.yml` file is only treated as a `wkrun` configuration if it positively validates against the `wkrun` schema.
+
+An unrelated `project.*` file must be ignored rather than producing a `wkrun` parsing error.
 
 ---
 
-# 7. Configuration Format
+# 8. Config Discovery Traversal
 
-Both TOML and YAML represent the same underlying schema.
+Configuration discovery starts at `$PWD` and walks upward.
 
-The configuration must contain a version and named services.
+When inside a Git repository or worktree, discovery should stop at the current repository/worktree boundary.
 
-Example:
+The nearest location containing an explicitly wkrun-owned configuration file or a positively validated generic `project.*` configuration wins. At that location, an explicitly wkrun-owned filename is authoritative: if its selected file is malformed or invalid, report that error rather than skipping it and continuing upward. Generic `project.*` files that do not positively validate as wkrun configuration are ignored and discovery continues upward.
+
+If multiple supported configuration files exist in the same directory, the configured priority order is used.
+
+`wkrun` should make the selected configuration file observable in diagnostics/status output.
+
+---
+
+# 9. Configuration Formats
+
+Both TOML and YAML map to the same logical schema.
+
+There are no YAML-specific product semantics.
+
+Example TOML:
 
 ```toml
 version = 1
@@ -255,7 +280,7 @@ http = "http://localhost:${services.api.ports.http}/health"
 
 [services.web]
 type = "process"
-command = "pnpm vite --port ${services.web.ports.http}"
+command = ["pnpm", "vite", "--port", "${services.web.ports.http}"]
 depends_on = ["api"]
 
 [services.web.ports]
@@ -267,11 +292,25 @@ API_URL = "http://localhost:${services.api.ports.http}"
 
 ---
 
-# 8. Service Types
+# 10. Naming Rules
 
-Every service must explicitly declare its runtime type.
+Service names and port names must be valid interpolation identifiers.
 
-Supported MVP values:
+Recommended MVP pattern:
+
+```text
+[A-Za-z][A-Za-z0-9_-]*
+```
+
+`.` is not allowed because interpolation paths use dots as separators.
+
+Names must be unique within their scope.
+
+---
+
+# 11. Service Types
+
+Every service explicitly declares:
 
 ```text
 process
@@ -279,15 +318,15 @@ docker
 compose
 ```
 
-Runtime type must not be inferred from the presence of fields such as `command` or `image`.
+Runtime type must not be inferred from the presence of fields such as `command`, `image`, or `file`.
 
-Explicit types improve validation, error reporting, and future schema extension.
+Explicit service types improve validation and make schema evolution safer.
 
 ---
 
-# 9. Process Services
+# 12. Process Services
 
-A local process service uses:
+Example:
 
 ```toml
 [services.api]
@@ -296,30 +335,88 @@ command = "cargo run"
 cwd = "./backend"
 ```
 
-Required:
+`cwd` is optional.
 
-```text
-type
-command
-```
+If omitted, the service runs relative to the project root.
 
-Optional:
+Process services may additionally specify:
 
-```text
-cwd
-depends_on
-ports
-env
-readiness
-```
-
-If `cwd` is omitted, the process runs relative to the project/workspace root.
+* `args`
+* `depends_on`
+* `ports`
+* `env`
+* `readiness`
 
 ---
 
-# 10. Docker Services
+# 13. Command Execution Model
 
-A Docker service runs a standalone Docker container.
+Three command forms are supported.
+
+## 13.1 Shell command
+
+```toml
+command = "cargo run"
+```
+
+String commands are executed using:
+
+```text
+/bin/sh -c
+```
+
+This provides convenient shell syntax while remaining deterministic across supported platforms.
+
+The user's interactive shell is not implicitly used.
+
+---
+
+## 13.2 Direct argv form
+
+```toml
+command = ["cargo", "run"]
+```
+
+This bypasses shell parsing.
+
+---
+
+## 13.3 Command plus args
+
+```toml
+command = "cargo"
+args = ["run", "--release"]
+```
+
+When `args` is provided, this is also direct execution and bypasses shell parsing.
+
+Direct execution is preferred where precise quoting and process behavior matter.
+
+---
+
+# 14. Process Groups and Signals
+
+Local services must be launched in identifiable process groups.
+
+This ensures that stopping:
+
+```text
+npm → node → vite
+```
+
+does not leave child processes running after the parent exits.
+
+Service shutdown should:
+
+1. request graceful termination of the owned process group
+2. allow a reasonable grace period
+3. force termination if required
+
+Exact grace-period duration may remain implementation-defined for MVP.
+
+---
+
+# 15. Docker Services
 
 Example:
 
@@ -329,20 +426,20 @@ type = "docker"
 image = "redis:8"
 ```
 
-Required:
+Docker services must support enough lifecycle control for:
 
-```text
-type
-image
-```
+* start
+* stop
+* restart
+* state inspection
+* configured host/container port mappings
+* reliable ownership identification
 
-Docker runtime options may be expanded later, but the MVP must support enough functionality to start, stop, restart, inspect, and expose configured ports for a container.
+Docker resources created by `wkrun` should be labeled with `wkrun` ownership metadata where practical.
 
 ---
 
-# 11. Docker Compose Services
-
-A Compose service references a service inside an existing Compose file.
+# 16. Docker Compose Services
 
 Example:
 
@@ -353,23 +450,72 @@ file = "docker-compose.yml"
 service = "postgres"
 ```
 
-Required:
+A configured Compose service refers to the named service in the user's Compose project.
 
-```text
-type
-file
-service
-```
+`wkrun` does not replace Docker Compose.
 
-`wkrun` does not replace Compose.
+Compose's own internal dependency graph is respected.
 
-It orchestrates selected Compose services as members of the `wkrun` workspace.
+`wkrun` must not use `--no-deps` by default.
+
+Compose-internal dependencies do not automatically become first-class `wkrun` services.
+
+If a Compose dependency is separately declared as a `wkrun` service, wkrun-level lifecycle/readiness semantics apply to that explicit service.
+
+Every wkrun workspace uses a deterministic, Docker-compatible, workspace-specific Compose project name. The exact generated format is an implementation detail. Resources in that namespace are wkrun-managed; manually invoked Compose projects in other namespaces are external and must not be adopted or destroyed.
 
 ---
 
-# 12. Ports
+# 17. Compose Port Behavior
 
-## 12.1 Named Ports
+Each named wkrun Compose port identifies a TCP container target port:
+
+```toml
+[services.db.ports.postgres]
+host = "random"
+target = 5432
+```
+
+If the user's Compose configuration already publishes that target and the mapping is available, it takes priority. After startup, wkrun inspects the resulting container and resolves `${services.db.ports.postgres}` to its actual host-side port. Dynamically allocated Compose host ports may therefore be discovered after startup.
+
+Example:
+
+```yaml
+ports:
+  - "5432:5432"
+```
+
+For MVP, only TCP mappings are supported and each configured target must have exactly one unambiguous host binding. Ambiguous mappings fail clearly rather than being guessed.
+
+If Compose startup fails because the published host port is occupied and `wkrun` configuration provides an alternative/random mapping, generate an ephemeral Compose override file and retry with the configured mapping.
+
+`wkrun` must never modify, rewrite, or `sed` the user's Compose file.
+
+Generated overrides belong to `wkrun` runtime/state storage.
+
+---
+
+# 18. Compose Ownership and Cleanup
+
+`wkrun` only stops or removes Compose resources in its workspace-specific Compose project namespace.
+
+If a wkrun-managed Compose invocation transitively starts dependencies, those resources are wkrun-managed for that workspace.
+
+Resources that already exist in the same workspace-specific Compose project are previously wkrun-managed resources and may be reconciled/adopted. Resources in a manually started or otherwise different Compose project are external and must not be adopted or destroyed.
+
+Concrete container/resource identities should be recorded or otherwise recoverably identifiable. If a Compose startup attempt fails, reconcile resources in the workspace Compose project before retrying; Compose may reuse partially created resources where safe, and those resources remain owned for intentional workspace cleanup.
+
+`wkrun down` must not blindly execute a project-wide:
+
+```bash
+docker compose down
+```
+
+when doing so could affect resources outside `wkrun` ownership.
+
+---
+
+# 19. Named Ports
 
 Ports are named.
 
@@ -381,42 +527,71 @@ http = "random"
 debug = 9229
 ```
 
-Named ports make runtime interpolation explicit and readable.
+Names are used by interpolation.
 
 ---
 
-## 12.2 Random Ports
+# 20. Fixed Process Ports
 
-The value:
+For a process service:
 
-```text
-"random"
+```toml
+[services.api.ports]
+http = 3000
 ```
 
-always means:
+means:
 
-> Allocate an available port exposed on the user's host machine.
+> use exactly host port 3000.
 
-Example:
+If the fixed port is unavailable, startup fails clearly.
+
+`wkrun` must not silently replace a user-specified fixed port with another port.
+
+---
+
+# 21. Random Host Ports
 
 ```toml
 [services.api.ports]
 http = "random"
 ```
 
-may resolve to:
+means:
 
-```text
-43127
-```
+> allocate an available host-machine port.
 
-The resolved value is then available through interpolation.
+The global daemon coordinates all `wkrun` allocations, preventing simultaneous workspaces managed by `wkrun` from intentionally receiving the same port.
+
+If a candidate becomes occupied between discovery and actual service binding, `wkrun` may allocate another candidate and retry.
+
+Kernel-level pre-reservation is not required for MVP.
+
+Port search should efficiently skip occupied ports/ranges.
 
 ---
 
-## 12.3 Docker Port Mapping
+# 22. Port Persistence
 
-Docker and Compose services distinguish the host port from the container target port.
+Random port persistence across `down` is preferred but best-effort for MVP.
+
+Preferred behavior:
+
+1. allocate a random port
+2. store the assignment in SQLite
+3. on later `up`, attempt to reuse it
+4. if occupied, allocate another available port
+5. update the stored assignment
+
+This gives a workspace stable URLs when practical.
+
+If preserving random assignments significantly complicates the MVP, reallocating after `down` is acceptable.
+
+---
+
+# 23. Docker Port Mapping
+
+Docker and Compose mappings distinguish host and container-side target ports.
 
 Example:
 
@@ -426,19 +601,26 @@ host = "random"
 target = 5432
 ```
 
-If `wkrun` allocates `43128`, the mapping is:
+If `43128` is allocated:
 
 ```text
 localhost:43128 → container:5432
 ```
 
-The interpolated service port refers to the host-side port:
+`host` may be:
+
+* a fixed numeric port
+* `"random"`
+
+For mappings created by `wkrun`, `target` is required.
+
+Interpolation resolves to the host-side port:
 
 ```text
 ${services.db.ports.postgres}
 ```
 
-resolves to:
+→
 
 ```text
 43128
@@ -446,126 +628,131 @@ resolves to:
 
 ---
 
-# 13. Interpolation
+# 24. Environment Inheritance
 
-Configuration values may reference runtime and environment values.
+Services inherit the environment supplied by the client process that initiates the lifecycle operation.
 
-Interpolation syntax:
+They must not blindly inherit the potentially stale environment from when the long-running daemon originally started.
+
+When:
+
+```bash
+wkrun up
+```
+
+is executed:
+
+```text
+invoking CLI environment
+        ↓
+sent to daemon
+        ↓
+service-specific overrides applied
+        ↓
+service process
+```
+
+Service-specific `env` values override inherited values.
+
+This common environment behavior applies consistently to process, Docker, and Compose services where applicable.
+
+The environment source is always the client process initiating a lifecycle operation. CLI requests send the invoking CLI process environment to the daemon. TUI requests send the environment captured when `wkrun tui` or `wkrun attach` started. The daemon must not substitute its own startup environment, an environment from a previous `up`, or a globally cached environment.
+
+An already-running TUI cannot observe environment changes later made in its parent shell. To apply those values, reopen the TUI from that shell or run the corresponding CLI restart command from that shell.
+
+---
+
+# 25. Interpolation
+
+Interpolation uses:
 
 ```text
 ${...}
 ```
 
----
-
-## 13.1 Service Port References
-
-Example:
+Supported MVP references include:
 
 ```text
 ${services.api.ports.http}
-```
-
----
-
-## 13.2 Host Environment References
-
-Example:
-
-```text
 ${env.API_TOKEN}
 ```
 
----
-
-## 13.3 Example
+Example:
 
 ```toml
 [services.web.env]
 API_URL = "http://localhost:${services.api.ports.http}"
-API_TOKEN = "${env.API_TOKEN}"
+TOKEN = "${env.API_TOKEN}"
 ```
 
-Interpolation must occur only after all required dynamic resources, such as random ports, have been resolved.
+`${env.NAME}` resolves from the environment snapshot supplied by the client initiating the lifecycle operation.
 
-Interpolation errors must produce clear validation or startup errors.
+Explicitly referencing a missing environment variable is an error.
+
+Interpolation is single-pass and non-recursive for MVP.
+
+Dynamic resource allocation, including random ports, must occur before dependent interpolation values are finalized.
 
 ---
 
-# 14. Dependencies
+# 26. Dependencies
 
-Services may declare dependencies:
+Example:
 
 ```toml
 [services.api]
 depends_on = ["db"]
 ```
 
-Dependency semantics are:
+A dependency without readiness unblocks its dependents when it starts successfully.
 
-### Dependency without readiness
+A dependency with readiness unblocks its dependents only after readiness succeeds.
 
-The dependent may start once the dependency has successfully started.
-
-### Dependency with readiness
-
-The dependent may start only once the dependency has passed its readiness check.
-
-Example:
-
-```text
-db starts
-↓
-db readiness succeeds
-↓
-api starts
-```
-
-Dependencies also affect runtime health state.
+Dependency cycles are invalid configuration.
 
 ---
 
-# 15. Readiness
+# 27. Readiness
 
-A service may define one readiness mechanism.
+MVP supports exactly:
 
-Supported MVP readiness types:
-
-```text
-TCP
-HTTP
-command
-```
+* TCP
+* HTTP
+* command
 
 Only one readiness mechanism may be configured per service.
 
 ---
 
-## 15.1 TCP Readiness
+# 28. TCP Readiness
 
 ```toml
 [services.db.readiness]
 tcp = "localhost:${services.db.ports.postgres}"
 ```
 
-Readiness succeeds once a TCP connection can successfully be established.
+Readiness succeeds when a TCP connection can be established.
 
 ---
 
-## 15.2 HTTP Readiness
+# 29. HTTP Readiness
 
 ```toml
 [services.api.readiness]
 http = "http://localhost:${services.api.ports.http}/health"
 ```
 
-For MVP, readiness succeeds when the endpoint returns a successful HTTP status.
+MVP success means HTTP status:
 
-Advanced options such as custom accepted status codes, headers, request methods, retry configuration, and authentication are post-MVP.
+```text
+200–299
+```
+
+Custom accepted status codes, headers, authentication, methods, etc. are post-MVP.
 
 ---
 
-## 15.3 Command Readiness
+# 30. Command Readiness
 
 ```toml
 [services.worker.readiness]
@@ -574,37 +761,107 @@ command = "some-check-command"
 
 Readiness succeeds when the command exits successfully.
 
----
-
-# 16. Service Lifecycle
-
-## 16.1 Unexpected Exit
-
-Unexpected service exits automatically trigger restart attempts.
-
-This applies to services that are intended to be running.
+Command readiness runs from the service's resolved `cwd`, with its resolved environment. String readiness commands use `/bin/sh -c`.
 
 ---
 
-## 16.2 Intentional Stop
+# 31. Readiness Timing
 
-If the user explicitly stops a service, `wkrun` must not restart it automatically.
+Readiness is continuous for the lifetime of a service.
 
-The supervisor must therefore distinguish between:
+MVP defaults:
 
 ```text
-unexpected exit
+poll interval: approximately 500ms
+timeout:       30s
 ```
 
-and:
+While the process/container is alive but initial readiness has not succeeded, the service state is:
 
 ```text
-intentional stop
+starting
 ```
+
+If the 30-second initial readiness timeout expires while the underlying runtime remains alive, the service becomes:
+
+```text
+unhealthy
+```
+
+`wkrun up` reports this startup outcome as unsuccessful but does not kill or restart the runtime. Probing continues, and one successful probe transitions the service from `unhealthy` to `running`.
+
+After initial readiness succeeds, probes continue. Three consecutive failed probes transition a previously healthy service from `running` to `unhealthy`. One successful probe recovers it to `running`.
+
+Readiness failures do not automatically restart the runtime and do not count toward the eight crash-restart failures.
 
 ---
 
-## 16.3 Restart Limit
+# 32. Service Lifecycle States
+
+MVP includes at least:
+
+```text
+starting
+running
+restarting
+stopped
+blocked
+degraded
+unhealthy
+failed
+```
+
+The persisted desired-state values are `running` and `stopped`. A service's displayed state describes its observed lifecycle and health; a desired-running service may therefore currently be `starting`, `unhealthy`, `blocked`, `degraded`, or `failed`.
+
+---
+
+# 33. Blocked vs Degraded
+
+`blocked` means:
+
+> the service has not started because a required dependency is unavailable, failed, or not ready.
+
+Example:
+
+```text
+db      failed
+api     blocked
+```
+
+`degraded` means:
+
+> the service is already running but a required dependency subsequently became unhealthy.
+
+Example:
+
+```text
+db      failed
+api     degraded
+```
+
+When the dependency recovers:
+
+* blocked services may resume startup
+* degraded services return to normal health automatically
+
+Dependency recovery does not restart already-running dependents.
+
+An unhealthy dependency blocks dependents that have not yet started and degrades dependents that are already running. When it returns to `running`, blocked dependents may resume startup and degraded dependents recover automatically.
+
+---
+
+# 34. Unexpected Exit and Restart
+
+Unexpected service exits trigger automatic restart.
+
+Explicit user actions such as:
+
+```text
+stop
+down
+```
+
+must never trigger automatic restart.
 
 A service may automatically restart up to:
 
@@ -615,267 +872,371 @@ A service may automatically restart up to:
 Example:
 
 ```text
-api    restarting (5/8)
+api  restarting (5/8)
 ```
 
-After eight consecutive failures:
+After eight consecutive crash failures:
 
 ```text
-api    failed
+api  failed
 ```
 
-Automatic restarting stops and the failure is surfaced to the user.
+Automatic restart stops until explicit user action.
+
+If an unhealthy but alive desired-running runtime later exits unexpectedly, the normal crash restart policy applies.
 
 ---
 
-## 16.4 Failure Counter Reset
+# 35. Restart Counter Reset
 
-For MVP, a service is considered stable after:
+MVP reset window:
 
 ```text
 30 seconds
 ```
 
-of successful continuous runtime.
+If the service remains successfully running for 30 continuous seconds, its consecutive crash counter resets.
 
-After this period, the consecutive-failure counter resets.
-
-Post-MVP, this duration becomes configurable through:
+Post-MVP this becomes configurable through mechanisms such as:
 
 ```text
-WKRUN_RESET_TIME
+WKRUN_RESET_TIME=500ms
+WKRUN_RESET_TIME=30s
+WKRUN_RESET_TIME=2m
 ```
 
-using duration values such as:
-
-```text
-500ms
-30s
-2m
-```
-
-and/or through:
-
-```text
-CONFIG_DIR/wkrun/config.toml
-```
-
-The exact post-MVP configuration precedence may be determined later.
+and/or user configuration under the platform config directory.
 
 ---
 
-# 17. Service States
+# 36. Restart Delay / Backoff
 
-The MVP must expose at least:
+Exact restart delay/backoff is not a major product requirement for MVP.
+
+The implementation should use a simple strategy that prevents an uncontrolled tight restart loop.
+
+The eight-failure cap remains authoritative.
+
+For wkrun-owned Docker and Compose resources, runtime-level automatic restart policies must be disabled so Docker/Compose does not conflict with wkrun's intentional-stop semantics or restart counter. Docker services launch with restart disabled. Compose uses an ephemeral override with `restart: "no"` when necessary; the source Compose file is never modified. External resources retain their existing policies because wkrun does not supervise them.
+
+---
+
+# 37. Hot Reload
+
+`wkrun` does not watch source files or implement hot reload.
+
+Examples of tools expected to continue handling their own hot reload:
+
+* Vite
+* Air
+* Nodemon
+* framework development servers
+* compiler watch modes
+
+---
+
+# 38. Startup Atomicity
+
+Workspace startup is not transactional.
+
+If:
 
 ```text
-starting
-running
-restarting
-stopped
-failed
+A starts
+B starts
+C fails
+```
+
+A and B remain running.
+
+They are not automatically rolled back because C failed.
+
+Services waiting on C remain:
+
+```text
+blocked
+```
+
+Already-running dependents of C become:
+
+```text
 degraded
 ```
 
-Readiness may additionally be represented separately or as part of the starting state.
-
 ---
 
-## 17.1 Starting
+# 39. Daemon Architecture
 
-The service is being launched or is waiting to satisfy readiness.
+MVP uses **one daemon per operating-system user**.
 
----
-
-## 17.2 Running
-
-The service is alive and its dependency requirements are healthy.
-
----
-
-## 17.3 Restarting
-
-The service exited unexpectedly and is undergoing an automatic restart attempt.
-
----
-
-## 17.4 Stopped
-
-The service is intentionally not running.
-
----
-
-## 17.5 Failed
-
-The service itself could not remain running after eight consecutive failures.
-
----
-
-## 17.6 Degraded
-
-The service itself may still be running, but one or more required dependencies are unhealthy or failed.
-
-Example:
-
-```text
-db      failed
-api     degraded
-web     degraded
-```
-
----
-
-# 18. Dependency Failure Propagation
-
-Dependency failures must not automatically stop dependents.
-
-Dependency failures must not automatically restart dependents.
-
-Instead:
-
-```text
-dependency fails
-↓
-dependent remains alive
-↓
-dependent becomes degraded
-```
-
-When the dependency recovers:
-
-```text
-dependency recovers
-↓
-dependent automatically returns to normal health
-```
-
-No dependent restart occurs unless explicitly requested by the user.
-
----
-
-# 19. Hot Reload
-
-`wkrun` must not implement source watching or automatic source-triggered process restarts.
-
-Existing development servers already provide this functionality.
-
-Examples include:
-
-```text
-Vite
-Air
-Nodemon
-framework dev servers
-watch-mode compilers
-```
-
-`wkrun` manages the service process itself and must avoid conflicting with the service's own reload system.
-
----
-
-# 20. Runtime Supervision
-
-The MVP does not require a single global always-running daemon.
-
-However, `wkrun up` must be useful as a CLI command and must not require a permanently open TUI.
-
-Therefore, an active workspace requires a lightweight supervisor that remains alive while its services are running.
+There is no per-workspace supervisor process model.
 
 Conceptually:
 
 ```text
-wkrun up
-   │
-   ├── workspace supervisor
-   │      ├── api
-   │      ├── web
-   │      ├── worker
-   │      └── db
-   │
-   └── CLI invocation may return
+CLI / TUI
+    │
+    │ Unix domain socket
+    ▼
+wkrun daemon
+    ├── project A
+    │   ├── main workspace
+    │   └── feat-auth workspace
+    └── project B
+        └── default workspace
 ```
 
-The workspace supervisor owns:
+The daemon owns live runtime state for all `wkrun` workspaces.
 
-* process lifecycle
-* automatic restarts
-* service state
+This includes:
+
+* service lifecycle
+* process groups
+* Docker/Compose lifecycle
+* dependencies
 * readiness
-* dependency state
-* log capture
-* runtime communication
-* allocated runtime resources
-
-The TUI and CLI communicate with this active workspace state.
+* restart counters
+* port allocation
+* live logs/events
+* workspace runtime state
 
 ---
 
-# 21. TUI Exit Behavior
+# 40. Daemon Startup
 
-Quitting the TUI must not stop running services.
+The daemon starts lazily when first required.
 
-The key:
+Users should not need to manually start it.
 
-```text
-q
+A command such as:
+
+```bash
+wkrun up
 ```
 
-means:
-
-> Quit the TUI only.
-
-It does not mean:
+behaves conceptually as:
 
 ```text
-wkrun down
+connect to daemon
+      │
+      ├─ success → continue
+      │
+      └─ failure
+           ↓
+      acquire daemon-start lock
+           ↓
+      check socket again
+           ↓
+      spawn daemon if still absent
+           ↓
+      wait for handshake
+           ↓
+      release lock
+           ↓
+      send requested operation
 ```
 
-Service lifecycle must be explicitly controlled through lifecycle commands or actions.
+The second liveness check after obtaining the lock prevents concurrent CLI calls from spawning duplicate daemons.
 
 ---
 
-# 22. Persistence
+# 41. Daemon Lifetime
 
-`wkrun` must remember projects and workspaces across invocations.
+Once started, the daemon remains running even when zero workspaces are active.
 
-Persistent state may include:
+A future explicit daemon stop/restart command may be added.
 
-* known projects
-* project paths
-* known workspaces
-* workspace paths
-* selected config file
-* allocated ports
-* supervisor identity
-* supervisor communication endpoint
-* log locations
-* relevant runtime metadata
+Normal TUI or CLI termination does not terminate the daemon.
 
-Persistence should use appropriate platform state/config directories rather than polluting the project directory unless explicitly required.
+---
+
+# 42. IPC
+
+CLI and TUI communicate with the daemon through a Unix domain socket.
+
+Preferred runtime location:
+
+```text
+$XDG_RUNTIME_DIR/wkrun/
+```
+
+when available.
+
+Fallback:
+
+```text
+$TMPDIR/wkrun-$UID/
+```
+
+or equivalent private per-user directory.
+
+Socket directories must not be writable by other users.
+
+The IPC protocol may use an internal structured protocol such as JSON messages for MVP.
+
+The exact serialization format is an implementation detail.
+
+---
+
+# 43. Daemon Handshake
+
+A successful handshake is the authority for daemon liveness.
+
+The handshake should include at least:
+
+* protocol version
+* daemon instance ID
+* daemon PID
+
+A PID or SQLite entry alone never proves the daemon is alive.
+
+---
+
+# 44. Protocol Compatibility
+
+Client and daemon must validate protocol compatibility.
+
+If an incompatible daemon is detected after upgrading `wkrun`, the CLI should use a controlled daemon-restart path.
+
+Restarting/upgrading the daemon must not intentionally stop running services.
+
+---
+
+# 45. Persistent Storage
+
+SQLite is preferred for durable application registry/state.
+
+Persistent data belongs in the platform data directory.
+
+Linux-style path:
+
+```text
+$XDG_DATA_HOME/wkrun/wkrun.db
+```
+
+with appropriate fallback such as:
+
+```text
+~/.local/share/wkrun/wkrun.db
+```
+
+macOS should use appropriate local per-user application locations while preserving equivalent semantics.
+
+Possible durable entities include:
+
+```text
+projects
+workspaces
+worktrees
+config paths
+service metadata
+port allocations
+historical/last-known metadata
+```
+
+Exact SQL schema is an implementation detail.
+
+---
+
+# 46. Runtime / State Storage
+
+Runtime state and logs belong under the platform state location.
 
 Conceptually:
 
 ```text
 $XDG_STATE_HOME/wkrun/
-├── projects/
-├── workspaces/
-├── supervisors/
-└── logs/
+├── logs/
+└── daemon/
 ```
 
-The exact on-disk representation is an implementation detail.
+with Linux fallback:
 
-Persisted state must tolerate stale supervisor or process information.
+```text
+~/.local/state/wkrun/
+```
 
-`wkrun` must verify runtime reality rather than blindly trusting persisted process IDs.
+The project repository should not be polluted with daemon/runtime files.
+
+Local service stdout and stderr must be directed to crash-safe per-service append log files under this state location rather than daemon-owned pipes. The daemon tails those files for CLI and TUI streaming. This allows local services to continue normally if the daemon crashes and allows a replacement daemon to resume log consumption. Preserving stdout/stderr distinction is optional for MVP.
 
 ---
 
-# 23. CLI
+# 47. Source of Runtime Truth
 
-The CLI must prioritize intuitive naming and predictable behavior.
+SQLite is not authoritative for live runtime state.
 
-Core MVP vocabulary:
+The order of authority is:
+
+1. daemon live state
+2. actual OS process inspection
+3. Docker inspection
+4. persisted SQLite metadata as historical/discovery information
+
+Persisted `running` state must not override observable reality.
+
+---
+
+# 48. Daemon Crash Behavior
+
+A daemon crash must not intentionally kill running services.
+
+Local service processes should continue running if the daemon disappears unexpectedly.
+
+Docker/Compose resources naturally continue unless separately terminated.
+
+While the daemon is dead, automatic supervision/restart functionality is temporarily unavailable.
+
+---
+
+# 49. Daemon Recovery / Reconciliation
+
+When a replacement daemon starts:
+
+* confidently identified processes/containers are adopted
+* uncertain resources are marked unknown/orphaned and left untouched
+* resources proven absent are reconciled as stopped/failed
+* stale metadata is corrected
+
+Desired service state (`running` or `stopped`) is durable user intent and must be persisted separately from live state. Intentionally stopped services remain stopped after recovery. Adopted desired-running services remain supervised, and persisted crash/restart metadata should be restored where available so daemon replacement does not trivially reset an existing crash loop.
+
+Never terminate a process merely because a persisted PID matches.
+
+Process IDs may be reused.
+
+Process-group identity and other process metadata should be used where practical.
+
+Docker resources should use ownership labels or concrete resource IDs where practical.
+
+---
+
+# 50. Log Recovery After Daemon Crash
+
+The crash-safe per-service log files allow a replacement daemon to resume reading existing service output. Retention and rotation remain implementation-defined as long as normal development sessions remain useful.
+
+---
+
+# 51. Persistence Across Invocations
+
+`wkrun` remembers known projects and workspaces across invocations.
+
+Persistence may include:
+
+* project identity/path
+* workspace identity/path
+* worktree relationship
+* config path
+* historical/random port assignments
+* runtime resource metadata
+* log locations
+
+Persisted metadata must be reconciled against live reality when used.
+
+---
+
+# 52. CLI Vocabulary
+
+Core MVP commands:
 
 ```text
 wkrun -h
@@ -886,7 +1247,7 @@ wkrun up [svc]
 
 wkrun down
 
-wkrun stop [svc]
+wkrun stop <svc>
 
 wkrun restart [svc]
 wkrun re [svc]
@@ -896,144 +1257,227 @@ wkrun logs [svc]
 
 wkrun ls
 
-wkrun attach [workspace]
+wkrun attach
+wkrun attach [workspace-or-service]
 
 wkrun tui
 ```
 
 ---
 
-# 24. CLI Semantics
+# 53. `wkrun up`
 
-## `wkrun -h`
+```bash
+wkrun up
+```
 
-Display concise help.
+starts services in the current workspace, respecting dependency/readiness ordering.
 
----
+The command talks to the daemon, waits until every requested service reaches a startup outcome, then exits while services remain running in the daemon.
 
-## `wkrun help`
+Successful startup means `running`, including successful readiness where configured. An unsuccessful startup outcome is `failed`, `unhealthy`, or `blocked` because a required dependency is unhealthy or failed. Exit with `0` only when all requested services are `running`; otherwise exit non-zero. Services not directly requested but brought up as dependencies are included in this startup outcome.
 
-Display CLI help.
+`up` is idempotent. Each invocation reloads the current config and sends the initiating client's current environment snapshot to the daemon. Already-running services are not restarted merely because config or environment changed. Stopped or missing services started by the invocation use the latest config and environment; users explicitly restart already-running services to apply changes.
 
-Subcommand-specific help should follow standard CLI expectations where supported.
-
----
-
-## `wkrun up`
-
-Start the current workspace.
-
-Services must be started in dependency-respecting order.
-
-The command must not require the TUI to remain open.
+Workspace-wide `up` is an explicit request to bring the whole workspace up. It sets every configured service's desired state to `running`, including services previously stopped individually, and starts them subject to dependency and readiness rules. Daemon recovery alone must not override an intentionally stopped desired state.
 
 ---
 
-## `wkrun up [svc]`
+# 54. `wkrun up <svc>`
 
-Start a specific service.
+```bash
+wkrun up api
+```
 
-Required dependencies must also be brought up as necessary.
+starts a specific service.
 
----
+Required dependencies are brought up as necessary.
 
-## `wkrun down`
+`up <svc>` ensures the service's desired state is running. If its runtime is already alive but `unhealthy`, it does not implicitly restart it; it waits for and reports the existing readiness outcome.
 
-Stop all services belonging to the current workspace.
+This is also the command used to start a service previously stopped using:
 
-The shutdown is intentional, so services must not be automatically restarted.
+```bash
+wkrun stop api
+```
 
----
-
-## `wkrun stop [svc]`
-
-Stop one service intentionally.
-
-The service remains stopped until explicitly started again.
+No separate `start` command is required for MVP.
 
 ---
 
-## `wkrun restart [svc]`
+# 55. `wkrun down`
 
-Restart the selected service.
+Stops all wkrun-owned services/resources in the current workspace intentionally.
 
-Alias:
+Services must not automatically restart afterward.
 
-```text
-wkrun re [svc]
+Cleanup must respect ownership boundaries, especially for Compose.
+
+---
+
+# 56. `wkrun stop <svc>`
+
+Stops one service intentionally.
+
+The service remains stopped during normal supervision and daemon recovery until an explicit start operation targets it. `up <svc>`, `restart <svc>`, workspace-wide `up`, and workspace-wide `restart` are explicit start operations.
+
+---
+
+# 57. `wkrun restart`
+
+```bash
+wkrun restart
+wkrun re
+```
+
+restarts all services in the current workspace, respecting dependency ordering.
+
+Workspace-wide restart is an explicit request to restart the whole workspace. It includes every configured service, including services previously stopped individually, and sets their desired state to `running`.
+
+Both workspace-wide and individual restart reload the current selected config from disk and use the environment snapshot from the client initiating the restart. They resolve interpolation, ports, and runtime configuration from that fresh input, intentionally stop the targeted runtime or runtimes, then start them using the newly resolved configuration and environment.
+
+---
+
+# 58. `wkrun restart <svc>`
+
+```bash
+wkrun restart api
+wkrun re api
+```
+
+restarts one service.
+
+An individual restart is an intentional runtime restart followed by the equivalent of `up <svc>`. Required dependencies are brought up when necessary, and readiness evaluation begins again for the restarted service.
+
+---
+
+# 59. `wkrun logs`
+
+```bash
+wkrun logs
+```
+
+shows combined logs for the current workspace.
+
+Combined logs identify their originating service.
+
+MVP behavior should:
+
+* show a bounded recent history
+* then follow new output by default
+* allow Ctrl-C to stop following without affecting services
+
+---
+
+# 60. `wkrun logs <svc>`
+
+Shows logs for one service and follows new output by default.
+
+---
+
+# 61. `wkrun ls`
+
+Works globally.
+
+Lists known projects/workspaces and useful runtime status.
+
+It must work even when invoked outside a project.
+
+---
+
+# 62. `wkrun attach`
+
+When invoked inside a recognized project/worktree:
+
+```bash
+wkrun attach
+```
+
+resolves context from `$PWD` and opens the TUI focused on that workspace.
+
+For a normal non-worktree project, this effectively behaves as:
+
+```bash
+wkrun tui
 ```
 
 ---
 
-## `wkrun logs`
+# 63. `wkrun attach <workspace>`
 
-Display combined workspace logs.
+Opens the TUI directly on the selected workspace.
 
-Logs should identify their originating service.
+Workspace arguments resolve by human-facing name within the current project first. Outside a project, a shorthand must be globally unambiguous. Internal workspace IDs may also be accepted as unambiguous targets. Ambiguity is always an error.
 
----
+`attach` does not modify a global persistent current-workspace setting.
 
-## `wkrun logs [svc]`
-
-Display logs for one service.
+Later CLI commands continue resolving context from `$PWD` or explicit arguments.
 
 ---
 
-## `wkrun ls`
+# 64. `wkrun attach <service>`
 
-List known projects and workspaces along with meaningful runtime status.
+When the argument resolves to a service in the current workspace, `attach` opens/focuses that service's logs.
 
-Exact presentation may evolve, but it should make active environments easy to discover.
-
----
-
-## `wkrun attach [workspace]`
-
-Attach or switch context to an existing workspace.
-
-This must work with persisted and active workspace information.
+Ambiguous resolution must produce a clear error rather than guessing.
 
 ---
 
-## `wkrun tui`
+# 65. CLI Context Outside a Project
 
-Open the interactive terminal UI.
+Outside a recognized project/workspace:
 
-When possible, it should enter the current project/workspace context automatically.
-
----
-
-# 25. TUI Goals
-
-The TUI is a core product interface, not an optional debugging frontend.
-
-It should allow the developer to navigate among:
-
-```text
-projects
-workspaces
-services
-service metadata
-logs
+```bash
+wkrun ls
 ```
 
-without switching terminals.
+works globally.
 
-The design must be:
-
-```text
-keyboard-first
-Vim-first
-not Vim-only
+```bash
+wkrun tui
 ```
 
-Arrow keys and intuitive alternatives should be supported where practical.
+opens the global TUI/project-workspace navigator.
+
+Commands requiring an implicit workspace context should fail clearly:
+
+```text
+wkrun up
+wkrun down
+wkrun logs
+wkrun stop api
+wkrun restart api
+```
+
+Do not silently choose among known workspaces.
+
+Explicit cross-workspace targeting may be added later.
 
 ---
 
-# 26. TUI Layout
+# 66. TUI
 
-The primary layout is:
+The TUI is a core interface, not a debugging add-on.
+
+It is:
+
+* keyboard-first
+* Vim-first
+* not Vim-only
+
+The hierarchy exposed by the TUI is:
+
+```text
+Project
+└── Workspace
+    └── Service
+```
+
+---
+
+# 67. TUI Layout
+
+Primary layout:
 
 ```text
 ┌────────────────────────────┬─────────────────────────────┐
@@ -1045,27 +1489,21 @@ The primary layout is:
 └────────────────────────────┴─────────────────────────────┘
 ```
 
-The four primary panes are:
+Primary panes:
 
-```text
-Services
-Metadata
-Projects / Workspaces
-Logs
-```
+* Services
+* Metadata
+* Projects / Workspaces
+* Logs
 
-Pane borders or equivalent visual treatment must clearly indicate:
+Visual treatment must clearly indicate:
 
-* currently selected pane
-* currently focused pane
+* selected pane
+* focused pane
 
 ---
 
-# 27. TUI Navigation Model
-
-The TUI has two navigation levels:
-
-## Pane Selection
+# 68. TUI Pane Navigation
 
 When no pane is focused:
 
@@ -1073,22 +1511,7 @@ When no pane is focused:
 h j k l
 ```
 
-move selection between panes according to their spatial relationship.
-
-Example:
-
-```text
-h → pane to the left
-j → pane below
-k → pane above
-l → pane to the right
-```
-
----
-
-## Pane Focus
-
-Pressing:
+moves between panes according to spatial direction.
 
 ```text
 Enter
@@ -1096,21 +1519,19 @@ Enter
 
 focuses the selected pane.
 
-Once focused, `hjkl` operate within that pane according to its content.
-
-Pressing:
-
 ```text
 Esc
 ```
 
-returns to pane-level navigation or closes the current overlay/context.
+leaves pane focus or closes the current overlay.
+
+When a pane is focused, `hjkl` operate according to that pane's contents.
 
 ---
 
-# 28. Direct Pane Shortcuts
+# 69. Direct Pane Shortcuts
 
-The following global shortcuts always focus the associated pane:
+Global shortcuts:
 
 ```text
 P → Projects / Workspaces
@@ -1119,22 +1540,11 @@ M → Metadata
 L → Logs
 ```
 
-These shortcuts provide fast navigation without requiring repeated pane movement.
+These directly focus their target pane.
 
 ---
 
-# 29. Services Pane
-
-The Services pane displays services belonging to the active workspace.
-
-Example:
-
-```text
-● api       running      :43127
-● web       running      :43128
-● postgres  running      :43129
-○ worker    stopped
-```
+# 70. Services Pane
 
 When focused:
 
@@ -1142,7 +1552,7 @@ When focused:
 j / k
 ```
 
-move through services.
+move between services.
 
 ```text
 l
@@ -1154,27 +1564,13 @@ or:
 Enter
 ```
 
-selects the service and focuses or activates its corresponding logs.
+selects the service and focuses/activates its logs.
 
-The selected service also controls what is displayed in the Metadata pane.
+The selected service also determines Metadata pane content.
 
 ---
 
-# 30. Projects / Workspaces Pane
-
-The pane presents hierarchical project/workspace information.
-
-Example:
-
-```text
-my-app
-├── main
-├── feat-auth
-└── fix-login
-
-other-project
-└── main
-```
+# 71. Projects / Workspaces Pane
 
 When focused:
 
@@ -1182,7 +1578,7 @@ When focused:
 j / k
 ```
 
-move through items.
+move between tree items.
 
 ```text
 h
@@ -1194,20 +1590,15 @@ collapses an expandable item or moves toward its parent.
 l
 ```
 
-expands an expandable item or descends into it.
+expands/descends.
 
-On the lowest relevant workspace level, selecting or entering the workspace updates the Services pane to represent that workspace.
+At workspace level, selecting the workspace updates the Services pane.
 
-`Enter` selects or opens the current project/workspace context.
+`Enter` opens/selects the current project/workspace.
 
 ---
 
-# 31. Logs Pane
-
-The Logs pane displays either:
-
-* combined workspace logs
-* logs for the currently selected service
+# 72. Logs Pane
 
 When focused:
 
@@ -1227,34 +1618,31 @@ scroll horizontally.
 g
 ```
 
-moves to the beginning.
+goes to the beginning.
 
 ```text
 G
 ```
 
-moves to the end/current tail position as appropriate.
+goes to the end/current tail.
 
 ---
 
-# 32. Metadata Pane
+# 73. Metadata Pane
 
-The Metadata pane displays information about the selected service.
-
-Possible information includes:
+Displays relevant selected-service information such as:
 
 * service name
 * runtime type
 * state
-* readiness state
+* readiness
 * uptime
-* restart attempts
-* PID or container identifier
+* crash/restart attempts
+* PID/container identity
 * assigned ports
-* dependency state
+* dependencies
 * command
 * working directory
-* relevant runtime metadata
 
 When focused:
 
@@ -1268,57 +1656,42 @@ scroll vertically.
 h / l
 ```
 
-may scroll horizontally when required.
+scroll horizontally when needed.
 
 ---
 
-# 33. Search and Filtering
-
-The key:
+# 74. Search / Filtering
 
 ```text
 /
 ```
 
-performs context-sensitive search or filtering based on the currently focused pane.
+performs context-sensitive search/filtering.
 
 Examples:
 
-### Logs
-
-Search log contents.
-
-### Services
-
-Filter/search services.
-
-### Projects / Workspaces
-
-Search project and workspace names.
-
-### Metadata
-
-Search visible metadata fields.
-
-After search:
+* Logs → search log content
+* Services → filter service names
+* Projects/Workspaces → search project/workspace names
+* Metadata → search visible metadata
 
 ```text
 n
 ```
 
-moves to the next match.
+next match.
 
 ```text
 N
 ```
 
-moves to the previous match.
+previous match.
 
 ---
 
-# 34. TUI Lifecycle Actions
+# 75. TUI Lifecycle Actions
 
-Global lifecycle actions operate on the currently meaningful selected scope.
+Global actions:
 
 ```text
 r → restart
@@ -1326,77 +1699,68 @@ s → stop
 u → start/up
 ```
 
----
+Scope must be deterministic.
 
-## Service Selected
-
-```text
-r → restart service
-s → stop service
-u → start service
-```
-
----
-
-## Workspace Selected
+When Projects/Workspaces pane is focused on a workspace:
 
 ```text
-r → restart all workspace services
-s → stop all workspace services
-u → start all workspace services
+r → restart workspace
+s → stop workspace
+u → start workspace
 ```
 
-Workspace-level actions must respect dependencies.
+When Services, Metadata, or Logs operate on a selected service:
 
-Project-wide lifecycle operations are not required for MVP.
+```text
+r → restart selected service
+s → stop selected service
+u → start selected service
+```
+
+TUI lifecycle actions send the TUI process's captured environment snapshot with their request. Service-specific environment configuration overrides that supplied client environment.
+
+Project-wide lifecycle operations are not part of MVP.
 
 ---
 
-# 35. TUI Other Keys
+# 76. Other TUI Keys
 
 ```text
 Enter → select/open/focus
 Esc   → go back / leave focus / close overlay
 q     → quit TUI only
-?     → show help
+?     → help
 ```
 
-Destructive or broad operations may request confirmation where appropriate.
+Quitting the TUI does not stop the daemon or workspace services.
+
+Arrow-key/non-Vim alternatives should be supported where practical.
 
 ---
 
-# 36. Logging Requirements
+# 77. Logging
 
-`wkrun` must capture service output.
+`wkrun` captures service output for CLI and TUI consumption.
 
-It should preserve the distinction between services and ideally stdout/stderr.
-
-Combined logs must clearly identify their originating service.
-
-Example:
+Combined logs identify their source:
 
 ```text
 api    | INFO listening on :43127
 web    | VITE ready in 241ms
 db     | database system is ready
-api    | GET /api/me 200
 ```
 
-Logs must remain available to both:
+MVP should preserve service output rather than aggressively rewrite it.
 
-```text
-wkrun logs
-```
+wkrun-added timestamps are optional and may remain implementation-defined.
 
-and the TUI.
-
-Persistence duration and log rotation policy may remain implementation-level decisions for MVP, provided normal development sessions remain usable.
+Historical retention/log rotation may remain implementation-defined as long as normal development sessions remain useful.
 
 ---
 
-# 37. Error Handling
+# 78. Error Handling
 
-Configuration and runtime errors must be actionable.
+Errors must be actionable.
 
 Bad:
 
@@ -1423,150 +1787,106 @@ service "web": unknown interpolation value:
 ${services.api.ports.grpc}
 ```
 
-Failures should identify:
+Errors should identify:
 
 * affected project/workspace
 * affected service
-* relevant field
+* relevant config field
 * underlying runtime cause where available
 
 ---
 
-# 38. Startup Validation
+# 79. Startup Validation
 
-Before launching services, `wkrun` should validate:
+Before launching services, validate:
 
 * configuration syntax
 * configuration version
 * service names
-* service types
+* port names
+* runtime type
+* runtime-specific required fields
 * dependency references
 * dependency cycles
 * readiness definitions
 * port definitions
-* interpolation references that can be statically validated
-* required runtime-specific fields
+* statically resolvable interpolation references
 
-Dependency cycles must be rejected.
+For MVP, reject unknown fields rather than silently ignoring typos. Environment values must be strings. `args` cannot be combined with array-form `command`; string `command` plus `args` and array-form `command` are direct execution, while a string `command` without `args` uses `/bin/sh -c`.
 
----
-
-# 39. Shutdown Behavior
-
-`wkrun down` must shut down workspace services intentionally and cleanly.
-
-Where possible:
-
-1. request graceful service termination
-2. allow a reasonable grace period
-3. force termination if necessary
-4. mark services stopped
-5. prevent automatic restart
-
-Process-tree cleanup must avoid leaving orphan development processes behind.
+Dependency cycles are configuration errors.
 
 ---
 
-# 40. Architecture Requirements
+# 80. MVP User Flow
 
-The implementation should keep these conceptual layers separate:
+A successful MVP supports this workflow:
 
 ```text
-Config
-  ↓
-Workspace / Service Model
-  ↓
-Supervisor
-  ↓
-Runtime Adapters
-  ├── Process
-  ├── Docker
-  └── Compose
-  ↓
-Events / State
-  ├── CLI
-  └── TUI
+enter project
+    ↓
+wkrun up
+    ↓
+CLI returns
+    ↓
+services remain supervised
+    ↓
+developer continues working
+    ↓
+wkrun logs / wkrun tui
+    ↓
+inspect / restart / stop services
+    ↓
+quit TUI
+    ↓
+services keep running
+    ↓
+wkrun down
 ```
 
-The TUI must not directly own process lifecycle logic.
+The MVP is not complete merely because it can technically launch multiple child processes.
 
-The CLI and TUI should both act through the same underlying state and supervisor abstractions.
-
-This makes future daemon extraction possible without redesigning the entire application.
+It must be useful as a daily development tool.
 
 ---
 
-# 41. MVP Usability Standard
+# 81. Post-MVP: Automatic Service Detection
 
-The MVP is not considered complete merely because it can technically launch multiple commands.
+`wkrun` should eventually detect likely development services from sources such as:
 
-A usable MVP must allow a developer to:
-
-```text
-enter a project
-↓
-run wkrun up
-↓
-return to their shell
-↓
-inspect services
-↓
-inspect logs
-↓
-open and close the TUI
-↓
-stop/restart individual services
-↓
-stop the workspace
-↓
-later invoke wkrun again and rediscover the project/workspace
-```
-
-without manually managing multiple terminal sessions.
-
----
-
-# 42. Post-MVP: Automatic Detection
-
-Post-MVP, `wkrun` should be capable of detecting likely services from project files.
-
-Potential sources include:
-
-* package manager scripts
+* `package.json`
 * Cargo projects
 * Go projects
-* Docker Compose files
+* Docker Compose
 * common framework conventions
 * development server configuration
 
-Automatic detection should produce or internally map into the same service model used by explicit configuration.
+Autodetection must map into the same service model used by explicit configuration.
 
-The config-driven system remains the canonical foundation.
+Explicit configuration remains supported.
 
 ---
 
-# 43. Post-MVP: Git Worktree Support
+# 82. Post-MVP: Git Worktree Support
 
 Git worktree support is a major planned capability.
 
-The intended model is:
+Example:
 
 ```text
-Project
-├── main workspace
-├── feat-auth workspace
-└── fix-login workspace
+my-project
+├── main
+├── feat-auth
+└── fix-login
 ```
 
-Each worktree should be capable of running a complete independent development environment.
+Each worktree maps to its own runnable workspace.
 
 ---
 
-# 44. Post-MVP: Worktree Port Isolation
+# 83. Post-MVP: Worktree Port Isolation
 
-Parallel worktrees frequently attempt to bind the same host ports.
-
-`wkrun` should resolve these conflicts automatically.
+Parallel workspaces should automatically avoid host-port conflicts.
 
 Example:
 
@@ -1584,56 +1904,45 @@ fix-login
   web → 5175
 ```
 
-Dynamic values should continue to resolve through the same interpolation system established in MVP.
+The same interpolation system established in MVP should support these allocations.
 
 ---
 
-# 45. Post-MVP: Docker Isolation Across Worktrees
+# 84. Post-MVP: Docker / Compose Worktree Isolation
 
-Parallel worktrees must not collide on:
+Parallel workspaces should avoid collisions involving:
 
-* container names
+* host ports
 * Compose project names
+* container names
 * networks
-* exposed host ports
-* other workspace-scoped Docker resources
+* workspace-owned Docker resources
 
-`wkrun` should automatically create workspace-specific Docker/Compose namespaces.
-
-Example:
-
-```text
-myapp-main-postgres-1
-myapp-feat-auth-postgres-1
-myapp-fix-login-postgres-1
-```
-
-The user should not need to manually construct these namespaces.
+Workspace-specific namespacing should be automatic where practical.
 
 ---
 
-# 46. Post-MVP: Worktree Management
+# 85. Post-MVP: Worktree Workflow
 
-Planned worktree-related capabilities include:
+Planned functionality includes:
 
 * discovering worktrees
-* listing worktrees
-* associating worktrees with workspaces
-* creating runnable workspace contexts
+* listing worktrees/workspaces
 * searching workspaces
 * attaching to workspaces
-* starting services when a worktree is created
-* managing multiple simultaneously active workspaces
+* associating worktrees with project workspaces
+* automatically starting a workspace after worktree creation
+* managing multiple concurrently active workspaces
 
-The exact CLI vocabulary for worktree creation/removal may be designed when implementation begins.
+Exact worktree lifecycle CLI vocabulary is not part of the MVP contract.
 
 ---
 
-# 47. Post-MVP: Global Configuration
+# 86. Post-MVP: User Configuration
 
-User-wide configuration should be supported under the platform configuration directory.
+User-global configuration may live under the platform config directory.
 
-Conceptual location:
+Conceptually:
 
 ```text
 CONFIG_DIR/wkrun/config.toml
@@ -1641,15 +1950,13 @@ CONFIG_DIR/wkrun/config.toml
 
 Potential settings include:
 
-* restart stability period
-* default runtime behavior
+* restart stability window
+* readiness timing
 * logging preferences
-* UI preferences
-* future global defaults
+* TUI preferences
+* future defaults
 
-Environment variables may override selected configuration values where appropriate.
-
-Example:
+Example environment override:
 
 ```text
 WKRUN_RESET_TIME=45s
@@ -1657,88 +1964,80 @@ WKRUN_RESET_TIME=45s
 
 ---
 
-# 48. Post-MVP: Global Daemon
+# 87. Architecture Boundaries
 
-MVP uses on-demand workspace supervision.
-
-A later version may introduce a global daemon:
+Implementation should preserve clear layers:
 
 ```text
-wkrund
-├── project registry
-├── workspace registry
-├── supervisors
-├── runtime state
-└── logs
-
-      ▲
-      │ IPC
-      │
-wkrun CLI / TUI
+Config / Discovery
+       ↓
+Project / Workspace / Service Model
+       ↓
+Daemon
+       ↓
+Runtime Adapters
+  ├── Process
+  ├── Docker
+  └── Compose
+       ↓
+Events / Runtime State
+  ├── CLI
+  └── TUI
 ```
 
-Potential benefits:
+CLI and TUI must use the same underlying daemon/runtime model.
 
-* centralized project discovery
-* centralized workspace supervision
-* easier multi-project navigation
-* cleaner attach behavior
-* unified logs
-* reduced duplicated supervisor infrastructure
+The TUI must not directly own child-process lifecycle.
 
-The MVP architecture must not require a global daemon, but should avoid choices that make one difficult to introduce later.
+SQLite must not become a substitute for the live runtime model.
 
 ---
 
-# 49. Success Criteria
+# 88. MVP Success Criteria
 
-The MVP succeeds if a developer with a project containing a backend, frontend, worker, and database can define those services once and then use:
+MVP succeeds when a developer with a project containing, for example:
+
+```text
+backend
+frontend
+worker
+database
+```
+
+can define the stack once and then primarily interact through:
 
 ```bash
 wkrun up
+wkrun logs
+wkrun tui
+wkrun stop api
+wkrun up api
+wkrun re api
+wkrun down
 ```
 
-instead of manually maintaining multiple terminal sessions.
+without maintaining multiple terminals solely to keep services alive.
 
-They must be able to:
+The developer must be able to rely on:
 
-* leave the launching terminal workflow
-* reopen `wkrun`
-* see the project and workspace
-* inspect all running services
-* view combined or per-service logs
-* stop/start/restart services
-* use the Vim-first TUI
-* rely on automatic restart after crashes
-* rely on dependency readiness
-* use dynamic ports without manually finding unused ones
-* use Docker and Compose services alongside local processes
-* quit the TUI without terminating their development environment
-
-The MVP should feel like a tool that can remain part of a developer's daily workflow, not a proof of concept.
+* dependency-aware startup
+* readiness checks
+* dynamic ports
+* fixed ports
+* environment interpolation
+* local processes
+* Docker
+* Docker Compose
+* automatic crash restart
+* clear blocked/degraded/failed states
+* persistent project/workspace discovery
+* daemon-backed background execution
+* combined and per-service logs
+* Vim-first TUI interaction
+* quitting the TUI without terminating the workspace
 
 ---
 
-# 50. Product Direction
+# 89. License
 
-The MVP establishes this abstraction:
-
-```text
-one workspace
-=
-one independently managed runnable instance of a project
-```
-
-The initial version solves multi-service local development.
-
-Future versions extend the same abstraction to:
-
-```text
-multiple projects
-×
-multiple worktrees
-×
-multiple isolated runtime environments
-```
-
-without requiring developers to manually manage terminal panes, conflicting ports, conflicting Docker resources, or runtime state.
+`wkrun` is licensed under the MIT License.
