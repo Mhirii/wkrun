@@ -284,15 +284,20 @@ fn exporter_failure_does_not_break_provider_construction() {
 
 #[test]
 fn batch_processor_drops_spans_when_queue_is_saturated() {
-    // Use a blocking exporter so the worker stalls inside the FIRST
-    // export() call while the test continues emitting spans and
-    // saturates the BSP's bounded queue. The release flag is sticky,
-    // so subsequent batches drain without further blocking.
+    // Configure a small BSP queue and batch size so saturation is
+    // easy to provoke. The first call to export() parks the worker
+    // inside BlockingExporter::export until the test releases the
+    // exporter via a Condvar gate; spans that arrive after the queue
+    // is full are dropped by the SDK's `try_send`. After release the
+    // exporter accepts every subsequent batch immediately, so the
+    // final captured count is bounded by what the queue + batch
+    // pipeline could absorb, not by the exporter's blocking.
     use std::sync::{Condvar, Mutex};
 
     #[derive(Debug)]
     struct BlockingExporter {
-        gate: Arc<(Mutex<Option<usize>>, Condvar)>,
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
         captured: Arc<Mutex<Vec<SpanData>>>,
     }
 
@@ -301,26 +306,20 @@ fn batch_processor_drops_spans_when_queue_is_saturated() {
             &self,
             batch: Vec<SpanData>,
         ) -> Result<(), opentelemetry_sdk::error::OTelSdkError> {
-            let (lock, cvar) = &*self.gate;
-            let mut order = lock.lock().expect("lock");
-            // Block until the test signals release for this batch.
-            while order.is_none() {
-                order = cvar.wait(order).expect("wait");
-            }
-            let batch_order = order.unwrap();
-            *order = None;
-            cvar.notify_all();
-            drop(order);
-            // The first batch must wait for explicit release; later
-            // batches drain automatically once the gate is reopened.
-            let (lock, cvar) = &*self.gate;
-            if batch_order == 0 {
-                let mut released = lock.lock().expect("lock");
-                while released.is_none() {
-                    released = cvar.wait(released).expect("wait");
+            // Signal the test that we have entered export() for the
+            // first time only.
+            {
+                let (lock, cvar) = &*self.entered;
+                let mut entered = lock.lock().expect("lock");
+                if !*entered {
+                    *entered = true;
+                    cvar.notify_all();
                 }
-                *released = None;
-                cvar.notify_all();
+            }
+            let (lock, cvar) = &*self.release;
+            let mut released = lock.lock().expect("lock");
+            while !*released {
+                released = cvar.wait(released).expect("wait");
             }
             self.captured.lock().expect("lock").extend(batch);
             Ok(())
@@ -340,39 +339,70 @@ fn batch_processor_drops_spans_when_queue_is_saturated() {
         fn set_resource(&mut self, _resource: &opentelemetry_sdk::Resource) {}
     }
 
-    let gate = Arc::new((Mutex::new(None::<usize>), Condvar::new()));
+    let entered = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
     let captured = Arc::new(Mutex::new(Vec::new()));
     let exporter = BlockingExporter {
-        gate: gate.clone(),
+        entered: entered.clone(),
+        release: release.clone(),
         captured: captured.clone(),
     };
 
-    let components = in_memory_components(exporter);
-    let provider = components.provider().clone();
+    // Build a BSP with a small queue and small batch so saturation is
+    // easy to provoke. The thread-based BSP exports serially; we use
+    // a long scheduled_delay so the timer-based flush does not race
+    // with our manual shutdown.
+    use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor};
+    let batch_processor = BatchSpanProcessor::builder(exporter)
+        .with_batch_config(
+            BatchConfigBuilder::default()
+                .with_max_queue_size(2)
+                .with_max_export_batch_size(1)
+                .with_scheduled_delay(std::time::Duration::from_secs(60))
+                .build(),
+        )
+        .build();
+    let provider = SdkTracerProvider::builder()
+        .with_span_processor(batch_processor)
+        .build();
     let tracer = provider.tracer(observability::TRACER_NAME);
 
-    // Emit more spans than the BSP default queue (128) plus the default
-    // batch size (512) can hold. The worker is parked in the FIRST
-    // batch's export() call, so every span beyond the queue capacity
-    // must be dropped.
-    const TOTAL: usize = 1024;
+    // Emit more spans than the queue can hold. The BSP worker is
+    // single-threaded; once it is parked in the first export() call,
+    // subsequent enqueues overflow the bounded queue and are dropped.
+    const TOTAL: usize = 64;
     for i in 0..TOTAL {
         let _span = tracer
             .span_builder(format!("test.saturation.{i}"))
             .start(&tracer);
     }
 
-    // Allow the first batch to proceed by signaling batch_order == 0.
+    // Wait until the BSP worker entered export() — this is the
+    // deterministic barrier that proves saturation has occurred.
     {
-        let (lock, cvar) = &*gate;
-        *lock.lock().expect("lock") = Some(0_usize);
+        let (lock, cvar) = &*entered;
+        let mut seen = lock.lock().expect("lock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !*seen {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("BSP worker should have entered export() within timeout");
+            }
+            seen = cvar.wait_timeout(seen, remaining).expect("wait").0;
+        }
+    }
+
+    // Release the exporter so subsequent batches drain.
+    {
+        let (lock, cvar) = &*release;
+        *lock.lock().expect("lock") = true;
         cvar.notify_all();
     }
 
-    // Flush and shut down. Subsequent batches drain automatically
-    // without further signaling.
+    // Drain the queue: force_flush sends a control message; shutdown
+    // drains pending spans after the control message is processed.
     let _ = provider.force_flush();
-    let _ = provider.shutdown_with_timeout(std::time::Duration::from_secs(2));
+    let _ = provider.shutdown_with_timeout(std::time::Duration::from_secs(5));
 
     let received = captured.lock().expect("lock").len();
     assert!(
