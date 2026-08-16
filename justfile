@@ -16,9 +16,9 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-# Run the unit and binary tests.
+# Run the library, binary, and integration tests.
 test:
-    cargo test --workspace --bins --all-features --locked
+    cargo test --workspace --lib --bins --all-features --locked
 
 # Run the cargo-nextest ci profile.
 nextest:
