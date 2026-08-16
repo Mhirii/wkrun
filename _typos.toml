@@ -1,0 +1,11 @@
+[files]
+extend-exclude = [
+    "target",
+    ".git",
+    "Cargo.lock",
+]
+
+[default]
+extend-words = {}
+extend-identifiers = {}
+extend-ignore-re = []
