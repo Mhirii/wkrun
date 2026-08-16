@@ -283,6 +283,85 @@ fn exporter_failure_does_not_break_provider_construction() {
 }
 
 #[test]
+fn exporter_failure_is_isolated_from_command_outcome() {
+    // A failing exporter must not panic the BSP worker, must not
+    // corrupt shutdown, and must tolerate a redundant second shutdown
+    // call. The BSP's batch processor does not propagate export
+    // failures back to the application through force_flush or
+    // shutdown (it logs them via otel_error); this test asserts that
+    // the bounded shutdown path remains safe regardless.
+    #[derive(Debug)]
+    struct FailingExporter;
+
+    impl SpanExporter for FailingExporter {
+        async fn export(
+            &self,
+            _batch: Vec<SpanData>,
+        ) -> Result<(), opentelemetry_sdk::error::OTelSdkError> {
+            Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
+                "intentional".into(),
+            ))
+        }
+
+        fn shutdown_with_timeout(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> Result<(), opentelemetry_sdk::error::OTelSdkError> {
+            Ok(())
+        }
+
+        fn force_flush(&self) -> Result<(), opentelemetry_sdk::error::OTelSdkError> {
+            Ok(())
+        }
+
+        fn set_resource(&mut self, _resource: &opentelemetry_sdk::Resource) {}
+    }
+
+    use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor};
+    let processor = BatchSpanProcessor::builder(FailingExporter)
+        .with_batch_config(
+            BatchConfigBuilder::default()
+                .with_max_queue_size(8)
+                .with_max_export_batch_size(1)
+                .with_scheduled_delay(std::time::Duration::from_secs(60))
+                .build(),
+        )
+        .build();
+    let provider = SdkTracerProvider::builder()
+        .with_span_processor(processor)
+        .build();
+    let tracer = provider.tracer(observability::TRACER_NAME);
+
+    // Emit a span so the BSP actually exercises the failing exporter.
+    {
+        let _span = tracer.span_builder("test.failing_exporter").start(&tracer);
+    }
+
+    // The bounded shutdown path must complete without panic and
+    // without timing out, regardless of exporter failures.
+    let result = observability::shutdown_provider_blocking(
+        provider.clone(),
+        std::time::Duration::from_secs(5),
+    );
+    assert!(
+        !result.timed_out,
+        "shutdown must complete within budget even when exporter fails, got {result:?}"
+    );
+
+    // A second shutdown attempt must remain safe (no panic). The
+    // provider is already shut down so the worker is gone; this
+    // confirms the bounded path tolerates a redundant call.
+    let result2 = observability::shutdown_provider_blocking(
+        provider.clone(),
+        std::time::Duration::from_secs(5),
+    );
+    assert!(
+        !result2.timed_out,
+        "second shutdown attempt must not time out, got {result2:?}"
+    );
+}
+
+#[test]
 fn batch_processor_drops_spans_when_queue_is_saturated() {
     // Configure a small BSP queue and batch size so saturation is
     // easy to provoke. The first call to export() parks the worker

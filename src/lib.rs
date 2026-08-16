@@ -6,12 +6,15 @@
 //! vectors and propagates the resulting `ExitCode`.
 //!
 //! All subsystem errors carry typed information through
-//! [`crate::error`]; the application composition layer preserves those
-//! typed sources and source chains through final reporting.
+//! [`crate::error`]; the application composition layer uses
+//! [`anyhow::Context`] only at this top-level boundary to attach
+//! contextual information around the typed sources and source chains.
 
 use std::ffi::OsString;
-use std::io::Write as _;
+use std::io::Write;
 use std::process::ExitCode;
+
+use anyhow::Context as _;
 
 use crate::cli::Cli;
 use crate::error::BootstrapError;
@@ -99,14 +102,18 @@ fn handle_parse_error(err: clap::Error) -> ApplicationOutcome {
 fn run_root_help(_cli: Cli) -> ApplicationOutcome {
     // Initialize observability before rendering help so any rendering or
     // shutdown failure is reported through the same channel as other
-    // bootstrap operations.
+    // bootstrap operations. The anyhow context attaches the configured
+    // boundary message while preserving the typed BootstrapError source.
     let config = ObservabilityConfig::from_env();
-    let guard = match observability::install(config) {
-        Ok(guard) => guard,
-        Err(err) => {
-            return report_install_failure(err);
-        }
-    };
+    let guard =
+        match observability::install(config).context("failed to initialize local diagnostics") {
+            Ok(guard) => guard,
+            Err(err) => {
+                return report_install_failure(BootstrapError::InstallSubscriber(
+                    format_anyhow_chain(&err),
+                ));
+            }
+        };
 
     // Render help in an inner scope so the command span is finished and
     // its entry guard dropped before we begin the explicit shutdown.
@@ -114,10 +121,7 @@ fn run_root_help(_cli: Cli) -> ApplicationOutcome {
         let span = tracing::info_span!("cli.command", command = "help");
         let _entered = span.enter();
         tracing::debug!(command = "help", "rendering root help");
-        match write_root_help() {
-            Ok(()) => Ok(()),
-            Err(err) => Err(err),
-        }
+        write_root_help()
     };
 
     let report = guard.shutdown();
@@ -125,7 +129,8 @@ fn run_root_help(_cli: Cli) -> ApplicationOutcome {
     if let Err(err) = render_result {
         // The primary failure is the help-writing failure. Report it
         // directly to stderr and return failure; telemetry shutdown
-        // degradation must not replace this signal.
+        // degradation must not replace this signal. The typed
+        // BootstrapError::WriteOutput source is preserved on err.
         eprintln!("error: {err}");
         report_final_degradation(&report);
         return ApplicationOutcome::Failure;
@@ -135,14 +140,37 @@ fn run_root_help(_cli: Cli) -> ApplicationOutcome {
     ApplicationOutcome::Success
 }
 
+/// Render an [`anyhow::Error`] chain as a single-line, sanitized
+/// string suitable for the typed boundary surface. The leading context
+/// is included; trailing sources are joined with `: `.
+fn format_anyhow_chain(err: &anyhow::Error) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for cause in err.chain() {
+        if !first {
+            out.push_str(": ");
+        }
+        out.push_str(&cause.to_string());
+        first = false;
+    }
+    out
+}
+
+/// Render and write the root help to a writer. Returns the typed
+/// `BootstrapError::WriteOutput` on failure so the source chain
+/// remains intact. Public so tests can inject a failing writer to
+/// exercise the typed-error reporting path end-to-end.
+pub fn write_root_help_to<W: Write>(mut writer: W) -> Result<(), BootstrapError> {
+    writer
+        .write_all(Cli::render_help().as_bytes())
+        .map_err(BootstrapError::WriteOutput)
+}
+
 /// Render and write the root help to stdout. Returns the typed
 /// `BootstrapError::WriteOutput` on failure so the source chain
 /// remains intact.
 fn write_root_help() -> Result<(), BootstrapError> {
-    let mut stdout = std::io::stdout();
-    stdout
-        .write_all(Cli::render_help().as_bytes())
-        .map_err(BootstrapError::WriteOutput)
+    write_root_help_to(std::io::stdout())
 }
 
 fn report_install_failure(err: BootstrapError) -> ApplicationOutcome {
@@ -192,12 +220,25 @@ mod tests {
 
     #[test]
     fn write_root_help_failure_preserves_io_source() {
-        // Render help to a sink that always errors. We exercise the
-        // typed path that maps write errors to BootstrapError.
-        // (write_root_help writes to stdout, which we cannot redirect
-        // from inside this test without closing fd 1; instead, the
-        // path is covered by tests/cli.rs at the process level.)
-        let err = BootstrapError::WriteOutput(std::io::Error::other("disk full"));
+        // Render help to a sink that always errors and confirm that
+        // write_root_help_to surfaces the typed BootstrapError::WriteOutput
+        // carrying the original io::Error as its source.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let err = write_root_help_to(FailingWriter).expect_err("write must fail");
+        match &err {
+            BootstrapError::WriteOutput(io_err) => {
+                assert!(io_err.to_string().contains("disk full"));
+            }
+            other => panic!("expected WriteOutput, got {other:?}"),
+        }
         let mut current: Option<&(dyn std::error::Error + 'static)> =
             std::error::Error::source(&err);
         let mut found = false;

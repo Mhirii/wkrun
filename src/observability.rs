@@ -239,17 +239,20 @@ impl Drop for ObservabilityGuard {
 
 /// Result of running `force_flush` + `shutdown_with_timeout` for a
 /// tracer provider inside a dedicated worker thread.
-#[derive(Clone, Copy, Debug, Default)]
-struct RemoteShutdownResult {
-    flush_failed: bool,
-    shutdown_failed: bool,
-    timed_out: bool,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RemoteShutdownResult {
+    pub flush_failed: bool,
+    pub shutdown_failed: bool,
+    pub timed_out: bool,
 }
 
 /// Spawn a dedicated worker that flushes and shuts down the provider
 /// within the given total budget. The worker is detached: when the
 /// budget is exceeded we report the timeout and return.
-fn shutdown_provider_blocking(
+///
+/// Public so tests can exercise the bounded shutdown path with
+/// deterministic exporters (failing or otherwise).
+pub fn shutdown_provider_blocking(
     provider: opentelemetry_sdk::trace::SdkTracerProvider,
     budget: Duration,
 ) -> RemoteShutdownResult {
