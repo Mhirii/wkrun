@@ -80,6 +80,40 @@ fn bare_invocation_prints_help_and_exits_zero() {
     assert!(stdout.contains("Usage:"));
     assert!(stdout.contains("--help"));
     assert!(stdout.contains("--version"));
+    // Bare invocation must not produce stderr noise.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.is_empty(),
+        "bare invocation should not write to stderr, got {stderr:?}"
+    );
+}
+
+#[test]
+fn invalid_rust_log_emits_sanitized_warning_and_keeps_successful_command() {
+    let output = wkrun_binary()
+        .env("RUST_LOG", "==invalid==")
+        .output()
+        .expect("run wkrun with invalid RUST_LOG");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "invalid RUST_LOG must not fail the command"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage:"),
+        "root help should still print to stdout, got {stdout:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid tracing filter directive"),
+        "sanitized fallback warning must appear in stderr, got {stderr:?}"
+    );
+    // The malformed directive text itself must not leak.
+    assert!(
+        !stderr.contains("==invalid=="),
+        "stderr leaked malformed directive text, got {stderr:?}"
+    );
 }
 
 #[test]
@@ -143,16 +177,18 @@ fn bare_invocation_with_unreachable_otlp_endpoint_succeeds_within_budget() {
     // timeout because `std::process::Command::timeout` is not yet
     // stable on every Rust version. If the worker does not finish in
     // time we report a failure rather than hanging the test suite.
+    use std::process::Stdio;
     use std::sync::mpsc;
     use std::thread;
 
-    let mut child = wkrun_binary()
+    let child = wkrun_binary()
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:1")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500ms")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn wkrun with unreachable otlp");
-    let _ = &mut child;
 
     let (tx, rx) = mpsc::channel();
     let waiter = thread::spawn(move || {
@@ -175,8 +211,12 @@ fn bare_invocation_with_unreachable_otlp_endpoint_succeeds_within_budget() {
         Some(0),
         "exporter failure must not change a successful command exit"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Warning may be present but must not contain endpoint details.
+    // Root help must still print to stdout.
+    assert!(stdout.contains("Usage:"));
+    // A sanitized degradation warning is allowed; endpoint details must
+    // not leak.
     assert!(
         !stderr.contains("127.0.0.1:1"),
         "stderr leaked endpoint details, got {stderr:?}"

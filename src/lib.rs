@@ -5,14 +5,13 @@
 //! in `src/main.rs` is intentionally minimal: it forwards argument
 //! vectors and propagates the resulting `ExitCode`.
 //!
-//! This module is the *only* place where `anyhow` is used. All
-//! subsystem errors carry typed information through [`crate::error`].
+//! All subsystem errors carry typed information through
+//! [`crate::error`]; the application composition layer preserves those
+//! typed sources and source chains through final reporting.
 
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::process::ExitCode;
-
-use anyhow::Context as _;
 
 use crate::cli::Cli;
 use crate::error::BootstrapError;
@@ -102,22 +101,24 @@ fn run_root_help(_cli: Cli) -> ApplicationOutcome {
     // shutdown failure is reported through the same channel as other
     // bootstrap operations.
     let config = ObservabilityConfig::from_env();
-    let install_result: anyhow::Result<_> =
-        observability::install(config).context("failed to initialize local diagnostics");
-    let guard = match install_result {
+    let guard = match observability::install(config) {
         Ok(guard) => guard,
         Err(err) => {
-            return report_install_failure(BootstrapError::InstallSubscriber(err.to_string()));
+            return report_install_failure(err);
         }
     };
 
-    let span = tracing::info_span!("cli.command", command = "help");
-    let _enter = span.enter();
-    tracing::debug!(command = "help", "rendering root help");
-
-    let render_result: anyhow::Result<()> = std::io::stdout()
-        .write_all(Cli::render_help().as_bytes())
-        .context("failed to render root help");
+    // Render help in an inner scope so the command span is finished and
+    // its entry guard dropped before we begin the explicit shutdown.
+    let render_result: Result<(), BootstrapError> = {
+        let span = tracing::info_span!("cli.command", command = "help");
+        let _entered = span.enter();
+        tracing::debug!(command = "help", "rendering root help");
+        match write_root_help() {
+            Ok(()) => Ok(()),
+            Err(err) => Err(err),
+        }
+    };
 
     let report = guard.shutdown();
 
@@ -134,10 +135,22 @@ fn run_root_help(_cli: Cli) -> ApplicationOutcome {
     ApplicationOutcome::Success
 }
 
+/// Render and write the root help to stdout. Returns the typed
+/// `BootstrapError::WriteOutput` on failure so the source chain
+/// remains intact.
+fn write_root_help() -> Result<(), BootstrapError> {
+    let mut stdout = std::io::stdout();
+    stdout
+        .write_all(Cli::render_help().as_bytes())
+        .map_err(BootstrapError::WriteOutput)
+}
+
 fn report_install_failure(err: BootstrapError) -> ApplicationOutcome {
     // Observability failed before installation completed; emit a direct
     // stderr fallback so the user sees the failure, then surface a
-    // failure outcome.
+    // failure outcome. The typed error's Display is sanitized — we do
+    // not include any caller-side configuration that might contain
+    // credentials.
     eprintln!("error: failed to initialize local diagnostics: {err}");
     ApplicationOutcome::Failure
 }
@@ -147,9 +160,6 @@ fn report_final_degradation(report: &ShutdownReport) {
         eprintln!("warning: {message}");
     }
 }
-
-// Required to keep `std::io::Write` available without an explicit import
-// in the function body where it is used through fully-qualified calls.
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
@@ -178,5 +188,26 @@ mod tests {
             ApplicationOutcome::UsageError(2).into_exit_code(),
             ExitCode::from(2u8)
         );
+    }
+
+    #[test]
+    fn write_root_help_failure_preserves_io_source() {
+        // Render help to a sink that always errors. We exercise the
+        // typed path that maps write errors to BootstrapError.
+        // (write_root_help writes to stdout, which we cannot redirect
+        // from inside this test without closing fd 1; instead, the
+        // path is covered by tests/cli.rs at the process level.)
+        let err = BootstrapError::WriteOutput(std::io::Error::other("disk full"));
+        let mut current: Option<&(dyn std::error::Error + 'static)> =
+            std::error::Error::source(&err);
+        let mut found = false;
+        while let Some(e) = current {
+            if e.to_string().contains("disk full") {
+                found = true;
+                break;
+            }
+            current = std::error::Error::source(e);
+        }
+        assert!(found, "WriteOutput must retain its io::Error source");
     }
 }

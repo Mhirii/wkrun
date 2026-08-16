@@ -5,17 +5,13 @@
 //! for config, daemon, IPC, runtime, Docker, Compose, or TUI subsystems
 //! are intentionally absent; they will be added when those subsystems
 //! are introduced.
-//!
-//! [`anyhow`] is used only at the application composition boundary. Each
-//! subsystem that needs typed distinctions should return one of the
-//! concrete error types in this module.
 
 use std::io;
 
 /// Concrete error type for application bootstrap operations.
 ///
 /// All error messages are lowercase so they remain grammatical when they
-/// become the source of an [`anyhow::Error`] chain.
+/// become the source of a typed error chain.
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     /// Failed to render the root CLI help to a byte buffer.
@@ -56,10 +52,9 @@ pub enum BootstrapError {
     #[error("failed to shut down otlp tracer provider")]
     ShutdownTracer(#[source] OtlpProviderError),
 
-    /// Failed to construct the dedicated tokio runtime that hosts the
-    /// OpenTelemetry batch processor.
-    #[error("failed to construct otel runtime")]
-    BuildOtelRuntime(#[source] io::Error),
+    /// Failed to construct the OpenTelemetry batch processor.
+    #[error("failed to construct otel batch processor")]
+    BuildOtelProcessor(String),
 }
 
 /// Wrapper around [`tracing_subscriber::filter::ParseError`] so the
