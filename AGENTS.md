@@ -112,6 +112,18 @@ Do not violate these without an explicit product decision:
 
 Read `docs/PRD.md` for detailed lifecycle, readiness, daemon, port, Compose, and CLI semantics rather than duplicating them here.
 
+## Architecture Decision Records
+
+ADRs live under `docs/adr/` and are named:
+
+```text
+[issue number]-[ADR number relative to that issue]-[name].md
+```
+
+Use zero-padded numeric fields. For example, the first ADR for issue `#24` is `docs/adr/0024-01-name.md`.
+
+When a task introduces or changes an architectural decision, add or update the relevant ADR rather than leaving the decision only in code or discussion.
+
 ## Working on an Issue
 
 Before editing:

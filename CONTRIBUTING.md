@@ -15,6 +15,22 @@ The PRD defines user-visible behavior. [`ROADMAP.md`](ROADMAP.md) defines implem
 
 Read [`AGENTS.md`](AGENTS.md) for the complete project guardrails. Do not change the PRD, roadmap, or agent guide unless the task explicitly calls for it.
 
+## Architecture Decisions
+
+Architecture Decision Records live in [`docs/adr/`](docs/adr/). Name each ADR using:
+
+```text
+[issue number]-[ADR number relative to that issue]-[name].md
+```
+
+Use zero-padded numeric fields. The first ADR for issue `#24`, for example, is:
+
+```text
+docs/adr/0024-01-name.md
+```
+
+If your change introduces or revises an architectural decision, record it in the appropriate ADR instead of documenting it only in code or a PR discussion.
+
 ## Development
 
 `wkrun` is a Rust 2024 binary crate. Useful commands:
