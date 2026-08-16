@@ -176,7 +176,7 @@ api    failed
 
 A service that stays running for 30 seconds resets its consecutive-failure counter.
 
-Explicitly stopped services stay stopped.
+An individually stopped service stays stopped during normal supervision and daemon recovery. A workspace-wide `wkrun up` or `wkrun restart` explicitly brings all configured services back up.
 
 `wkrun` does not implement hot reload itself. Tools like Vite, Air, Nodemon, and framework dev servers continue to handle that.
 
@@ -222,6 +222,8 @@ Wkrun
 ```
 
 `Workfile` and `Wkrun` are always parsed as TOML.
+
+Generic `project.*` files are used only when they positively validate as a `wkrun` configuration; unrelated files with those names are ignored.
 
 ### Example
 
@@ -281,6 +283,7 @@ wkrun down
 
 wkrun stop api
 
+wkrun restart
 wkrun restart api
 wkrun re api
 
@@ -288,7 +291,9 @@ wkrun logs
 wkrun logs api
 
 wkrun ls
+wkrun attach
 wkrun attach <workspace>
+wkrun attach <service>
 
 wkrun tui
 
@@ -426,12 +431,11 @@ Planned post-MVP work includes:
 * Git worktree integration
 * automatic per-worktree port isolation
 * Docker / Compose isolation between worktrees
-* discovering and attaching to workspaces
+* worktree discovery and management
 * starting environments automatically for newly created worktrees
 * global user configuration
 * configurable restart stability windows
 * richer readiness checks
-* a global daemon for centralized multi-project orchestration
 
 A future setup could look like:
 
